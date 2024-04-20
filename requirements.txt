@@ -1,0 +1,8 @@
+setuptools
+tree-sitter>=0.21.3
+pandas
+networkx
+numpy
+tqdm
+line_profiler
+pyarrow
