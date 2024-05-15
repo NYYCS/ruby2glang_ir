@@ -540,7 +540,7 @@ class Parser(common_parser.Parser):
         catch = self.find_child_by_field(node, 'handler')
         catch_body = []
 
-        self.parse(catch_body, catch)
+        self.parse(catch, catch_body)
 
         statements.append({ 'try_stmt': { 'body': try_body, 'catch_body': [{ 'catch_stmt': { 'body': catch_body } }]}})
     
