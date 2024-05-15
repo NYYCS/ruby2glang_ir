@@ -310,6 +310,7 @@ class Parser(common_parser.Parser):
         STATEMENT_HANDLER_MAP = {
             "if": self.if_statement,
             "if_modifier": self.if_modifier_statement,
+            "unless": self.unless_statement,
             "unless_modifier": self.unless_modifier_statement,
             "for": self.for_statement,
             "while": self.while_statement,
@@ -364,6 +365,23 @@ class Parser(common_parser.Parser):
         self.parse(body, new_body)
 
         statements.append({"if_stmt": {"condition": shadow_condition, "then_body": new_body }})
+
+    def unless_statement(self, node, statements):
+        condition_part = self.find_child_by_field(node, "condition")
+        true_part = self.find_child_by_field(node, "consequence")
+        false_part = self.find_child_by_field(node, "alternative")
+
+        true_body = []
+
+        shadow_condition = self.parse(condition_part, statements)
+        self.parse(true_part, true_body)
+
+        if false_part:
+            false_body = []
+            self.parse(false_part, false_body)
+            statements.append({"if_stmt": {"condition": shadow_condition, "then_body": false_body, "else_body": true_body}})
+        else:
+            statements.append({"if_stmt": {"condition": shadow_condition, "then_body": false_body}})
 
     def unless_modifier_statement(self, node, statements):
         condition = self.find_child_by_field(node, "condition")
