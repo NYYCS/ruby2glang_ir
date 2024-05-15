@@ -381,7 +381,7 @@ class Parser(common_parser.Parser):
             self.parse(false_part, false_body)
             statements.append({"if_stmt": {"condition": shadow_condition, "then_body": false_body, "else_body": true_body}})
         else:
-            statements.append({"if_stmt": {"condition": shadow_condition, "then_body": false_body}})
+            statements.append({"if_stmt": {"condition": shadow_condition, "then_body": [], "else_body": true_body}})
 
     def unless_modifier_statement(self, node, statements):
         condition = self.find_child_by_field(node, "condition")
