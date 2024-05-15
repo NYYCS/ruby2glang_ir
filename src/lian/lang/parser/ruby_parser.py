@@ -43,11 +43,6 @@ class Parser(common_parser.Parser):
             self.parse(child, statements, replacement)
 
         ret = self.read_node_text(node)
-        if replacement:
-            for r in replacement:
-                (expr, value) = r
-                ret = ret.replace(self.read_node_text(expr), value)
-
         return self.escape_string(ret)
 
     def regular_literal(self, node, statements, replacement):
@@ -72,7 +67,6 @@ class Parser(common_parser.Parser):
         tmp_var = self.tmp_variable(statements)
         statements.append({"new_map": {"type": "", "target": tmp_var}})
 
-        index = 0
         for child in node.named_children:
             if self.is_comment(child):
                 continue 
@@ -83,7 +77,6 @@ class Parser(common_parser.Parser):
             shadow_value = self.parse(value, statements)
 
             statements.append({"map_write": {"map": tmp_var, "key": shadow_key, "value": shadow_value}})
-            index += 1
 
         return tmp_var
 
@@ -143,6 +136,7 @@ class Parser(common_parser.Parser):
             "operator_assignment": self.operator_assignment_expression,
             "call": self.call_expression,
             "element_reference": self.element_reference_expression,
+            "argument_list": self.argument_list_expression,
         }
 
         return EXPRESSION_HANDLER_MAP.get(node.type, None)
@@ -210,7 +204,10 @@ class Parser(common_parser.Parser):
         left = self.find_child_by_field(node, "left")
         right = self.find_child_by_field(node, "right")
 
-        shadow_right = self.parse(right, statements)
+        if right.type == 'right_assignment_list':
+            shadow_right = self.argument_list_expression(right, statements)
+        else:
+            shadow_right = self.parse(right, statements)
 
         if left.type == "element_reference":
             shadow_map, shadow_key = self.parse_element_reference(left, statements)
@@ -223,16 +220,22 @@ class Parser(common_parser.Parser):
             shadow_name = self.parse(name)
 
             myobject = self.find_child_by_field(left, "receiver")
-            shadow_object = self.parse_call_receiver(myobject, statements)
+            shadow_object = self.parse(myobject, statements)
 
             statements.append(
                     {"field_write": {"receiver_object": shadow_object, "field": shadow_name, "source": shadow_right}})
                     
             return shadow_right
 
-        shadow_left = self.read_node_text(left)
-
-        statements.append({"assign_stmt": {"target": shadow_left, "operand": shadow_right}})
+        if right.type == 'right_assignment_list':
+            for index, shadow_left in enumerate(self.read_node_text(left).split(',')):
+                shadow_left = shadow_left.strip()
+                tmp_var = self.tmp_variable(statements)
+                statements.append({ "array_read": { "target": tmp_var, "array": shadow_right, "index": str(index) }})
+                statements.append({ "assign_stmt": { "target": shadow_left, "operand": tmp_var }})
+        else:
+            shadow_left = self.read_node_text(left)
+            statements.append({ "assign_stmt": { "target": shadow_left, "operand": shadow_right }})
 
         return shadow_left
 
@@ -252,17 +255,14 @@ class Parser(common_parser.Parser):
         
 
     def call_expression(self, node, statements):
-        name = self.find_child_by_field(node, "method")
+        name = self.find_child_by_field(node, "name")
         shadow_name = self.parse(name, statements)
 
-        shadow_object = ""
         myobject = self.find_child_by_field(node, "receiver")
-        
+
         if myobject:
-            shadow_object = self.parse_call_receiver(myobject, statements)
+            shadow_object = self.parse(myobject, statements)
             tmp_var = self.tmp_variable(statements)
-            statements.append(
-                {"field_read": {"target": tmp_var, "receiver_object": shadow_object , "field": shadow_name}})
             shadow_name = tmp_var
 
         args = self.find_child_by_field(node, "arguments")
@@ -278,7 +278,7 @@ class Parser(common_parser.Parser):
                     args_list.append(shadow_variable)
 
         tmp_return = self.tmp_variable(statements)
-        statements.append({"call_stmt": {"target": tmp_return, "name": shadow_name, "type_parameters": "", "args": args_list}})
+        statements.append({"call_stmt": {"target": tmp_return, "name": shadow_name, "type_parameters": '', "args": args_list}})
 
         return self.global_return()
 
@@ -288,13 +288,46 @@ class Parser(common_parser.Parser):
         statements.append({"map_read": {"target": tmp_var, "map": shadow_map, "key": shadow_key}})
         return tmp_var
 
+    def argument_list_expression(self, node, statements):
+        tmp_var = self.tmp_variable(statements)
+        statements.append({"new_array": {"type": "", "target": tmp_var}})
+
+        index = 0
+        for child in node.named_children:
+            if self.is_comment(child):
+                continue
+
+            shadow_child = self.parse(child, statements)
+            statements.append({"array_write": {"array": tmp_var, "index": str(index), "source": shadow_child}})
+            index += 1
+
+        return tmp_var
+
     def case_expression(self, node, statements):
         pass
 
     def check_statement_handler(self, node):
         STATEMENT_HANDLER_MAP = {
             "if": self.if_statement,
-            "for": self.for_statement
+            "if_modifier": self.if_modifier_statement,
+            "unless_modifier": self.unless_modifier_statement,
+            "for": self.for_statement,
+            "while": self.while_statement,
+            "while_modifier": self.while_statement,
+            "until": self.until_statement,
+            "until_modifier": self.until_statement,
+            "break": self.break_statement,
+            "next": self.next_statement,
+            "begin": self.begin_statement,
+            "do": self.do_statement,
+            "rescue_modifier": self.rescue_modifier_statement,
+            "case": self.case_statement,
+            "when": self.when_statement,
+            "then": self.then_statement,
+            "else": self.else_statement,
+            "return": self.return_statement,
+            "yield": self.yield_statement,
+            "undef": self.undef_statement,
         }
         return STATEMENT_HANDLER_MAP.get(node.type, None)
 
@@ -321,21 +354,27 @@ class Parser(common_parser.Parser):
         else:
             statements.append({"if_stmt": {"condition": shadow_condition, "then_body": true_body}})
 
-    def while_statement(self, node, statements):
+    def if_modifier_statement(self, node, statements):
         condition = self.find_child_by_field(node, "condition")
+        shadow_condition = self.parse(condition)
+
         body = self.find_child_by_field(node, "body")
+        new_body = []
 
-        new_condition_init = []
+        self.parse(body, new_body)
 
-        shadow_condition = self.parse(condition, new_condition_init)
+        statements.append({"if_stmt": {"condition": shadow_condition, "then_body": new_body }})
 
-        new_while_body = []
-        self.parse(body, new_while_body)
+    def unless_modifier_statement(self, node, statements):
+        condition = self.find_child_by_field(node, "condition")
+        shadow_condition = self.parse(condition)
 
-        statements.extend(new_condition_init)
-        new_while_body.extend(new_condition_init)
+        body = self.find_child_by_field(node, "body")
+        new_body = []
 
-        statements.append({"while_stmt": {"condition": shadow_condition, "body": new_while_body}})
+        self.parse(body, new_body)
+
+        statements.append({"if_stmt": {"condition": shadow_condition, "then_body": [], "else_body": new_body }})
 
     def for_statement(self, node, statements):
         pattern = self.find_child_by_field(node, "pattern")
@@ -371,6 +410,176 @@ class Parser(common_parser.Parser):
                                 "target": shadow_value,
                                 "body": for_body}})
 
+    def break_statement(self, node, statements):
+        statements.append({ 'break_stmt': {}} )
+
+    def next_statement(self, node, statements):
+        statements.append({ 'continue_stmt': {}} )
+
+    def while_statement(self, node, statements):
+        condition = self.find_child_by_field(node, "condition")
+        body = self.find_child_by_field(node, "body")
+
+        new_condition_init = []
+
+        shadow_condition = self.parse(condition, new_condition_init)
+
+        new_while_body = []
+        self.parse(body, new_while_body)
+
+        statements.extend(new_condition_init)
+        new_while_body.extend(new_condition_init)
+
+        statements.append({"while_stmt": {"condition": shadow_condition, "body": new_while_body}})
+
+    def until_statement(self, node, statements):
+        self.while_statement(node, statements)
+
+        tmp_var = self.tmp_variable(statements)
+        statement = statements.pop()
+
+        statements.append({ 'assign_stmt': 
+            { 'target': tmp_var, 'operator': '!', 'operand': statement['while_stmt']['condition']} })
+
+        statement['while_stmt']['body'].append({ 'assign_stmt': 
+            { 'target': tmp_var, 'operator': '!', 'operand': statement['while_stmt']['condition']} })
+
+        statement['while_stmt']['condition'] = tmp_var
+
+        statements.append(statement)
+
+    def do_statement(self, node, statements):
+        body = []
+        for child in node.named_children:
+            self.parse(child, body)
+        statements.append({ 'block': { 'body': body }})
+
+    def begin_statement(self, node, statements):
+        body = []
+
+        rescue_nodes = []
+        else_node = None
+        ensure_node = None
+
+        for child in node.named_children:
+            if child.type == 'rescue':
+                rescue_nodes.append(child)
+                continue
+
+            if child.type == 'else':
+                else_node = child
+                continue
+            
+            if child.type == 'ensure':
+                ensure_node = child
+                continue
+
+            self.parse(child, body)
+
+        if rescue_nodes or else_node or ensure_node:
+            try_stmt_opt = { "body": body }
+
+            catch_body = []
+
+            for rescue_node in rescue_nodes:
+                new_clause_body = []
+                clause_body = self.find_child_by_field(rescue_node, 'body')
+
+                self.parse(clause_body, new_clause_body)
+
+                exceptions = self.find_child_by_field(rescue_node, 'exceptions')
+                for exception in self.read_node_text(exceptions).split(','):
+                    catch_body.append({ 'catch_stmt': { 'exception': exception.strip(), 'body': new_clause_body }})
+
+            try_stmt_opt['catch_body'] = catch_body
+
+            if else_node is not None:
+                new_clause_body = []
+
+                for child in else_node.named_children:
+                    self.parse(clause_body, new_clause_body)
+
+                try_stmt_opt['else_body'] = new_clause_body
+
+            if ensure_node is not None:
+                new_clause_body = []
+
+                for child in ensure_node.named_children:
+                    self.parse(clause_body, new_clause_body)
+
+                try_stmt_opt['final_body'] = new_clause_body
+
+            return statements.append({"block": { "body": [{ 'try_stmt': try_stmt_opt }] }})
+
+        statements.append({"block": { "body": body }})
+
+    def rescue_modifier_statement(self, node, statements):
+        body = self.find_child_by_field(node, 'body')
+        try_body = []
+
+        self.parse(body, try_body)
+
+        catch = self.find_child_by_field(node, 'handler')
+        catch_body = []
+
+        self.parse(catch_body, catch)
+
+        statements.append({ 'try_stmt': { 'body': try_body, 'catch_body': [{ 'catch_stmt': { 'body': catch_body } }]}})
+    
+    def case_statement(self, node, statements):
+        condition = self.find_child_by_field(node, 'value')
+        shadow_condition = self.parse(condition, statements)
+
+        new_body = []
+    
+        for child in node.named_children:
+            self.parse(child, new_body)
+
+        statements.append({ 'switch_stmt': { 'condition': shadow_condition, 'body': new_body }})
+
+    def when_statement(self, node, statements):
+        condition = self.find_child_by_field(node, 'pattern')
+        shadow_condition = self.parse(condition, statements)
+
+        body = self.find_child_by_field(node, 'body')
+        new_body = []
+
+        self.parse(body, new_body)
+
+        statements.append({ 'case_stmt': { 'condition': shadow_condition, 'body': new_body }})
+
+    def then_statement(self, node, statements):
+        for child in node.named_children:
+            self.parse(child, statements)
+
+    def else_statement(self, node, statements):
+        new_body = []
+        for child in node.named_children:
+            self.parse(child, new_body)
+        statements.append({ 'default_stmt': { 'body': new_body }})
+
+    def return_statement(self, node, statements):
+        shadow_name = ""
+        if node.named_child_count > 0:
+            name = node.named_children[0]
+            shadow_name = self.parse(name, statements)
+
+        statements.append({"return_stmt": {"target": shadow_name}})
+        return shadow_name
+
+    def yield_statement(self, node, statements):
+        shadow_name = ""
+        if node.named_child_count > 0:
+            name = node.named_children[0]
+            shadow_name = self.parse(name, statements)
+
+        statements.append({"return_stmt": {"target": shadow_name}})
+        return shadow_name
+
+    def undef_statement(self, node, statements):
+        for child in self.read_node_text(node).split(','):
+            statements.append({ 'del_stmt': { 'target': child }})
+
     def parse_call_receiver(self, node, statements):
         receiver = self.find_child_by_field(node, 'receiver')
         remaining_content = self.read_node_text(node).split('.')
@@ -385,7 +594,6 @@ class Parser(common_parser.Parser):
             receiver_object = tmp_var
 
         return receiver_object
-
 
     def parse_element_reference(self, node, statements):
         myobject = self.find_child_by_field(node, "object")
