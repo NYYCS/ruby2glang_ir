@@ -415,7 +415,7 @@ class Parser(common_parser.Parser):
 
         for index, shadow_name in enumerate(shadow_names):
             tmp_var2 = self.tmp_variable(statements)
-            statements.append({ "array_read": { "target": tmp_var2, "array": tmp_var, "index": index }})
+            statements.append({ "array_read": { "target": tmp_var2, "array": tmp_var, "index": str(index) }})
             statements.append({ "assign_stmt": {"target": shadow_name, "operand": tmp_var2 }})
 
         body = self.find_child_by_field(node, "body")
