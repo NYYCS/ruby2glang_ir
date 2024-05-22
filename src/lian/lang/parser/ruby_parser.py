@@ -2,6 +2,7 @@
 
 from . import common_parser
 
+from collections import defaultdict
 
 class Parser(common_parser.Parser):
     def is_comment(self, node):
@@ -16,6 +17,7 @@ class Parser(common_parser.Parser):
             "float": self.regular_number,
             # "complex": self.complex,
             # "rational": self.rational,
+            "constant": self.constant,
             "string": self.string_literal,
             "true": self.regular_literal,
             "false": self.regular_literal,
@@ -36,6 +38,10 @@ class Parser(common_parser.Parser):
         value = self.read_node_text(node)
         value = self.common_eval(value)
         return str(value)
+
+    def constant(self, node, statements, replacement):
+        value = self.read_node_text(node)
+        return value
 
     def string_literal(self, node, statements, replacement):
         replacement = []
@@ -83,6 +89,10 @@ class Parser(common_parser.Parser):
     def check_declaration_handler(self, node):
         DECLARATION_HANDLER_MAP = {
             "method": self.method_declaration,
+            "lambda": self.lambda_declaration,
+            "class": self.class_declaration,
+            "singleton_class": self.singleton_class_declaration,
+            "module": self.module_declaration,
         }
         return DECLARATION_HANDLER_MAP.get(node.type, None)
 
@@ -94,24 +104,33 @@ class Parser(common_parser.Parser):
         return handler(node, statements)
 
     def method_declaration(self, node, statements):
-        child = self.find_child_by_field(node, "type")
-        mytype = self.read_node_text(child)
+        name = self.find_child_by_field(node, "name")
+        shadow_name = self.read_node_text(name)
 
-        child = self.find_child_by_field(node, "name")
-        name = self.read_node_text(child)
-
+        parameters = self.find_child_by_field(node, "parameters")
         new_parameters = []
         init = []
-        child = self.find_child_by_field(node, "parameters")
-        if child and child.named_child_count > 0:
-            # need to deal with parameters
-            for p in child.named_children:
-                if self.is_comment(p):
-                    continue
 
-                self.parse(p, init)
-                if len(init) > 0:
-                    new_parameters.append(init.pop())
+        if parameters:
+            # need to deal with parameters
+            for parameter in parameters.named_children:
+                if parameter.type == 'identifier':
+                    shadow_parameter = self.read_node_text(parameter)
+                    new_parameters.append(shadow_parameter)
+                elif parameter.type == 'optional_parameter':
+                    parameter_name = self.find_child_by_field(parameter, 'name')
+                    shadow_parameter = self.read_node_text(parameter_name)
+                    new_parameters.append(shadow_parameter)
+
+                    new_init = []
+
+                    value = self.find_child_by_field(parameter, 'value')
+                    shadow_value = self.parse(value, new_init)
+
+                    new_init.append({ 'assign_stmt': { 'target': shadow_parameter, 'operand': shadow_value }})
+
+                    init.extend(new_init)
+
 
         new_body = []
         child = self.find_child_by_field(node, "body")
@@ -123,20 +142,109 @@ class Parser(common_parser.Parser):
                 self.parse(stmt, new_body)
 
         statements.append(
-            {"method_decl": {"attr": "", "data_type": "", "name": name, "type_parameters": "",
+            {"method_decl": {"attr": "", "data_type": "", "name": shadow_name,
                              "parameters": new_parameters, "init": init, "body": new_body}})
+
+    def lambda_declaration(self, node, statements):
+        tmp_method = self.tmp_method()
+
+        parameters = self.find_child_by_field(node, "parameters")
+        new_parameters = []
+        init = []
+
+        if parameters:
+            # need to deal with parameters
+            for parameter in parameters.named_children:
+                if parameter.type == 'identifier':
+                    shadow_parameter = self.read_node_text(parameter)
+                    new_parameters.append(shadow_parameter)
+                elif parameter.type == 'optional_parameter':
+                    parameter_name = self.find_child_by_field(parameter, 'name')
+                    shadow_parameter = self.read_node_text(parameter_name)
+                    new_parameters.append(shadow_parameter)
+
+                    new_init = []
+
+                    value = self.find_child_by_field(parameter, 'value')
+                    shadow_value = self.parse(value, new_init)
+
+                    new_init.append({ 'assign_stmt': { 'target': shadow_parameter, 'operand': shadow_value }})
+
+                    init.extend(new_init)
+
+
+        new_body = []
+        child = self.find_child_by_field(node, "body")
+        if child:
+            for stmt in child.named_children:
+                if self.is_comment(stmt):
+                    continue
+
+                self.parse(stmt, new_body)
+
+        statements.append(
+            {"method_decl": {"attr": "", "data_type": "", "name": tmp_method,
+                             "parameters": new_parameters, "init": init, "body": new_body}})
+
+
+    def class_declaration(self, node, statements):
+        glang_node = defaultdict(list)
+
+        name = self.find_child_by_field(node, 'name')
+        shadow_name = self.parse(name)  
+
+        glang_node['name'] = shadow_name
+
+        superclass = self.find_child_by_field(node, 'superclass')
+        if superclass:
+            superclass = superclass.children[1]
+            shadow_superclass = self.read_node_text(superclass)
+            glang_node['supers'].append(shadow_superclass)
+
+        body = self.find_child_by_field(node, 'body')
+
+        for child in body.named_children:
+            if child.type == 'method':
+                method = []
+                self.method_declaration(child, method)
+                glang_node['member_methods'].append(method.pop())
+            if child.type == 'assignment':
+                left = self.find_child_by_field(child, 'left')
+
+                right = self.find_child_by_field(child, 'right')
+                shadow_right = self.parse(right)
+
+                if left.type == 'instance_variable':
+                    shadow_left = self.read_node_text(left)[1:]
+                    glang_node['fields'].append({ 'variable_decl': { 'name': shadow_left }}) 
+                    glang_node['init'].append({ 'field_write': { 'receiver_object': self.global_self(), 'field': shadow_left, 'source': shadow_right }})
+                elif left.type == 'class_variable':
+                    shadow_left = self.read_node_text(left)[2:]
+                    glang_node['static_init'].append({ 'assign_stmt': { 'target': shadow_left, 'operand': shadow_right }})
+
+        statements.append({ 'class_decl': dict(glang_node) })
+
+    def singleton_class_declaration(self, node, statements):
+        self.class_declaration(node, statements)
+        statements[-1]['class_decl']['attr'] = ['singleton']
+
+    def module_declaration(self, node, statements):
+        body = self.find_child_by_field(node, 'body')
+        new_body = []
+        self.parse(body, new_body)
+        statements.append({ 'namespace_decl': { 'body': new_body }})
 
     def check_expression_handler(self, node):
         EXPRESSION_HANDLER_MAP = {
             "binary": self.binary_expression,
             "unary": self.unary_expression,
             "conditional": self.conditional_expression,
-            "case": self.case_expression,
             "assignment": self.assignment_expression,
             "operator_assignment": self.operator_assignment_expression,
             "call": self.call_expression,
             "element_reference": self.element_reference_expression,
             "argument_list": self.argument_list_expression,
+            "instance_variable": self.instance_variable_expression,
         }
 
         return EXPRESSION_HANDLER_MAP.get(node.type, None)
@@ -197,9 +305,6 @@ class Parser(common_parser.Parser):
 
         return tmp_var
 
-    def case_expression(self, node, statements):
-        pass
-
     def assignment_expression(self, node, statements):
         left = self.find_child_by_field(node, "left")
         right = self.find_child_by_field(node, "right")
@@ -227,6 +332,13 @@ class Parser(common_parser.Parser):
                     
             return shadow_right
 
+        if left.type == 'instance_variable':
+            shadow_name = self.read_node_text(left)[1:]
+            statements.append(
+                {"field_write": { "receiver_object": self.global_self(), "field": shadow_name, "source": shadow_right }}
+            )
+            return shadow_right
+
         if right.type == 'right_assignment_list':
             for index, shadow_left in enumerate(self.read_node_text(left).split(',')):
                 shadow_left = shadow_left.strip()
@@ -240,22 +352,15 @@ class Parser(common_parser.Parser):
         return shadow_left
 
     def operator_assignment_expression(self, node, statements):
-        left = self.find_child_by_field(node, "left")
-        right = self.find_child_by_field(node, "right")
-        operator = self.find_child_by_field(node, "operator")
+        operator = self.find_child_by_field(node, 'operator')
         shadow_operator = self.read_node_text(operator).replace("=", "")
+        shadow_left = self.assignment_expression(node, statements)
 
-        shadow_right = self.parse(right, statements)
-        shadow_left = self.read_node_text(left)
-
-        statements.append({"assign_stmt": {"target": shadow_left, "operator": shadow_operator,
-                                            "operand": shadow_left, "operand2": shadow_right}})
-
+        statements[-1][list(statements[-1].keys()).pop()]['operator'] = shadow_operator
         return shadow_left
-        
 
     def call_expression(self, node, statements):
-        name = self.find_child_by_field(node, "name")
+        name = self.find_child_by_field(node, "method")
         shadow_name = self.parse(name, statements)
 
         myobject = self.find_child_by_field(node, "receiver")
@@ -303,8 +408,11 @@ class Parser(common_parser.Parser):
 
         return tmp_var
 
-    def case_expression(self, node, statements):
-        pass
+    def instance_variable_expression(self, node, statements):
+        shadow_name = self.read_node_text(node)[1:]
+        tmp_var = self.tmp_variable(statements)
+        statements.append({ "field_read": { "target": tmp_var, "receiver_object": self.global_this(), "field": shadow_name }})
+        return tmp_var
 
     def check_statement_handler(self, node):
         STATEMENT_HANDLER_MAP = {
